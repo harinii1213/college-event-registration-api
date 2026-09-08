@@ -1,7 +1,22 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from fastapi import Depends, FastAPI, HTTPException
+from pydantic import BaseModel, Field
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from database import AsyncSessionLocal
+from models import Event
+
 
 app = FastAPI(title="College Event Registration API")
+
+
+# =========================
+# Database Dependency
+# =========================
+
+async def get_db():
+    async with AsyncSessionLocal() as session:
+        yield session
 
 
 # =========================
@@ -9,21 +24,17 @@ app = FastAPI(title="College Event Registration API")
 # =========================
 
 class EventCreate(BaseModel):
-    name: str
-    description: str
-    date: str
-    venue: str
+    name: str = Field(..., min_length=1, max_length=255)
+    description: str = Field(..., min_length=1)
+    date: str = Field(..., min_length=1, max_length=50)
+    venue: str = Field(..., min_length=1, max_length=255)
 
 
 class EventResponse(EventCreate):
     id: int
 
-
-# =========================
-# Temporary Data Storage
-# =========================
-
-events = []
+    class Config:
+        from_attributes = True
 
 
 # =========================
@@ -31,7 +42,7 @@ events = []
 # =========================
 
 @app.get("/health")
-def health_check():
+async def health_check():
     return {
         "status": "success",
         "message": "API is running"
@@ -42,16 +53,31 @@ def health_check():
 # Create Event
 # =========================
 
-@app.post("/events", response_model=EventResponse)
-def create_event(event: EventCreate):
-    new_event = EventResponse(
-        id=len(events) + 1,
-        **event.model_dump()
-    )
+@app.post("/events", response_model=EventResponse, status_code=201)
+async def create_event(
+    event_data: EventCreate,
+    db: AsyncSession = Depends(get_db)
+):
+    try:
+        new_event = Event(
+            name=event_data.name,
+            description=event_data.description,
+            date=event_data.date,
+            venue=event_data.venue,
+        )
 
-    events.append(new_event)
+        # Transactional database write
+        async with db.begin():
+            db.add(new_event)
+            await db.flush()
 
-    return new_event
+        return new_event
+
+    except Exception:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to create event"
+        )
 
 
 # =========================
@@ -59,7 +85,12 @@ def create_event(event: EventCreate):
 # =========================
 
 @app.get("/events", response_model=list[EventResponse])
-def get_events():
+async def get_events(
+    db: AsyncSession = Depends(get_db)
+):
+    result = await db.execute(select(Event))
+    events = result.scalars().all()
+
     return events
 
 
@@ -68,13 +99,20 @@ def get_events():
 # =========================
 
 @app.get("/events/{event_id}", response_model=EventResponse)
-def get_event(event_id: int):
-
-    for event in events:
-        if event.id == event_id:
-            return event
-
-    raise HTTPException(
-        status_code=404,
-        detail="Event not found"
+async def get_event(
+    event_id: int,
+    db: AsyncSession = Depends(get_db)
+):
+    result = await db.execute(
+        select(Event).where(Event.id == event_id)
     )
+
+    event = result.scalar_one_or_none()
+
+    if event is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Event not found"
+        )
+
+    return event
