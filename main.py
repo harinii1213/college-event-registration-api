@@ -1,4 +1,4 @@
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,6 +28,13 @@ class EventCreate(BaseModel):
     description: str = Field(..., min_length=1)
     date: str = Field(..., min_length=1, max_length=50)
     venue: str = Field(..., min_length=1, max_length=255)
+
+
+class EventUpdate(BaseModel):
+    name: str | None = Field(None, min_length=1, max_length=255)
+    description: str | None = Field(None, min_length=1)
+    date: str | None = Field(None, min_length=1, max_length=50)
+    venue: str | None = Field(None, min_length=1, max_length=255)
 
 
 class EventResponse(EventCreate):
@@ -66,7 +73,6 @@ async def create_event(
             venue=event_data.venue,
         )
 
-        # Transactional database write
         async with db.begin():
             db.add(new_event)
             await db.flush()
@@ -81,14 +87,22 @@ async def create_event(
 
 
 # =========================
-# Get All Events
+# Get All Events - Pagination
 # =========================
 
 @app.get("/events", response_model=list[EventResponse])
 async def get_events(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(10, ge=1, le=100),
     db: AsyncSession = Depends(get_db)
 ):
-    result = await db.execute(select(Event))
+    result = await db.execute(
+        select(Event)
+        .order_by(Event.id)
+        .offset(skip)
+        .limit(limit)
+    )
+
     events = result.scalars().all()
 
     return events
@@ -116,3 +130,65 @@ async def get_event(
         )
 
     return event
+
+
+# =========================
+# Update Event
+# =========================
+
+@app.patch("/events/{event_id}", response_model=EventResponse)
+async def update_event(
+    event_id: int,
+    event_data: EventUpdate,
+    db: AsyncSession = Depends(get_db)
+):
+    result = await db.execute(
+        select(Event).where(Event.id == event_id)
+    )
+
+    event = result.scalar_one_or_none()
+
+    if event is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Event not found"
+        )
+
+    update_data = event_data.model_dump(exclude_unset=True)
+
+    for field, value in update_data.items():
+        setattr(event, field, value)
+
+    await db.commit()
+    await db.refresh(event)
+
+    return event
+
+
+# =========================
+# Delete Event
+# =========================
+
+@app.delete("/events/{event_id}")
+async def delete_event(
+    event_id: int,
+    db: AsyncSession = Depends(get_db)
+):
+    result = await db.execute(
+        select(Event).where(Event.id == event_id)
+    )
+
+    event = result.scalar_one_or_none()
+
+    if event is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Event not found"
+        )
+
+    await db.delete(event)
+    await db.commit()
+
+    return {
+        "message": "Event deleted successfully"
+    }
