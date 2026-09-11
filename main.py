@@ -6,11 +6,11 @@ from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
-from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import AsyncSessionLocal
 from models import Event
+from services import event_service
 
 
 # =========================
@@ -196,7 +196,8 @@ async def create_event(
     current_user: str = Depends(get_current_user),
 ):
     try:
-        new_event = Event(
+        new_event = await event_service.create_event(
+            db=db,
             name=event_data.name,
             description=event_data.description,
             date=event_data.date,
@@ -204,13 +205,14 @@ async def create_event(
             owner_username=current_user,
         )
 
-        async with db.begin():
-            db.add(new_event)
-            await db.flush()
+        await db.commit()
+        await db.refresh(new_event)
 
         return new_event
 
     except Exception:
+        await db.rollback()
+
         raise HTTPException(
             status_code=500,
             detail="Failed to create event",
@@ -246,44 +248,15 @@ async def get_events(
     db: AsyncSession = Depends(get_db),
     current_user: str = Depends(get_current_user),
 ):
-    query = select(Event).where(
-        Event.owner_username == current_user
+    events = await event_service.get_events(
+        db=db,
+        owner_username=current_user,
+        search=search,
+        venue=venue,
+        date=date,
+        skip=skip,
+        limit=limit,
     )
-
-    # Search by event name or description
-    if search:
-        search_pattern = f"%{search}%"
-
-        query = query.where(
-            or_(
-                Event.name.ilike(search_pattern),
-                Event.description.ilike(search_pattern),
-            )
-        )
-
-    # Filter by venue
-    if venue:
-        query = query.where(
-            Event.venue.ilike(f"%{venue}%")
-        )
-
-    # Filter by date
-    if date:
-        query = query.where(
-            Event.date == date
-        )
-
-    # Stable ordering + pagination
-    query = (
-        query
-        .order_by(Event.id)
-        .offset(skip)
-        .limit(limit)
-    )
-
-    result = await db.execute(query)
-
-    events = result.scalars().all()
 
     return events
 
@@ -301,11 +274,10 @@ async def get_event(
     db: AsyncSession = Depends(get_db),
     current_user: str = Depends(get_current_user),
 ):
-    result = await db.execute(
-        select(Event).where(Event.id == event_id)
+    event = await event_service.get_event(
+        db=db,
+        event_id=event_id,
     )
-
-    event = result.scalar_one_or_none()
 
     if event is None:
         raise HTTPException(
@@ -332,11 +304,10 @@ async def update_event(
     db: AsyncSession = Depends(get_db),
     current_user: str = Depends(get_current_user),
 ):
-    result = await db.execute(
-        select(Event).where(Event.id == event_id)
+    event = await event_service.get_event(
+        db=db,
+        event_id=event_id,
     )
-
-    event = result.scalar_one_or_none()
 
     if event is None:
         raise HTTPException(
@@ -350,11 +321,11 @@ async def update_event(
         exclude_unset=True
     )
 
-    for field, value in update_data.items():
-        setattr(event, field, value)
-
-    await db.commit()
-    await db.refresh(event)
+    event = await event_service.update_event(
+        db=db,
+        event=event,
+        update_data=update_data,
+    )
 
     return event
 
@@ -369,11 +340,10 @@ async def delete_event(
     db: AsyncSession = Depends(get_db),
     current_user: str = Depends(get_current_user),
 ):
-    result = await db.execute(
-        select(Event).where(Event.id == event_id)
+    event = await event_service.get_event(
+        db=db,
+        event_id=event_id,
     )
-
-    event = result.scalar_one_or_none()
 
     if event is None:
         raise HTTPException(
@@ -383,8 +353,10 @@ async def delete_event(
 
     verify_event_owner(event, current_user)
 
-    await db.delete(event)
-    await db.commit()
+    await event_service.delete_event(
+        db=db,
+        event=event,
+    )
 
     return {
         "message": "Event deleted successfully"
