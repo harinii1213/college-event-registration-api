@@ -1,4 +1,10 @@
-from fastapi import Depends, FastAPI, HTTPException, Query
+import os
+from datetime import datetime, timedelta, timezone
+
+import jwt
+from dotenv import load_dotenv
+from fastapi import Depends, FastAPI, HTTPException, Query, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -7,7 +13,25 @@ from database import AsyncSessionLocal
 from models import Event
 
 
+# =========================
+# Environment
+# =========================
+
+load_dotenv()
+
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
+
+if not JWT_SECRET_KEY:
+    raise ValueError("JWT_SECRET_KEY is not set")
+
+
+# =========================
+# App
+# =========================
+
 app = FastAPI(title="College Event Registration API")
+
+security = HTTPBearer()
 
 
 # =========================
@@ -22,6 +46,16 @@ async def get_db():
 # =========================
 # Pydantic Models
 # =========================
+
+class LoginRequest(BaseModel):
+    username: str = Field(..., min_length=1)
+    password: str = Field(..., min_length=1)
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str
+
 
 class EventCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
@@ -45,6 +79,60 @@ class EventResponse(EventCreate):
 
 
 # =========================
+# Authentication
+# =========================
+
+def create_access_token(username: str):
+    expire = datetime.now(timezone.utc) + timedelta(hours=1)
+
+    payload = {
+        "sub": username,
+        "exp": expire,
+    }
+
+    return jwt.encode(
+        payload,
+        JWT_SECRET_KEY,
+        algorithm="HS256",
+    )
+
+
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+):
+    token = credentials.credentials
+
+    try:
+        payload = jwt.decode(
+            token,
+            JWT_SECRET_KEY,
+            algorithms=["HS256"],
+        )
+
+        username = payload.get("sub")
+
+        if not username:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid authentication token",
+            )
+
+        return username
+
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication token has expired",
+        )
+
+    except jwt.InvalidTokenError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication token",
+        )
+
+
+# =========================
 # Health Check
 # =========================
 
@@ -57,13 +145,44 @@ async def health_check():
 
 
 # =========================
+# Login
+# =========================
+
+@app.post("/auth/login", response_model=TokenResponse)
+async def login(login_data: LoginRequest):
+
+    # Demo credentials for the internship task.
+    # Do not use these credentials in production.
+    if (
+        login_data.username != "admin"
+        or login_data.password != "admin123"
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid username or password",
+        )
+
+    access_token = create_access_token(login_data.username)
+
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+    }
+
+
+# =========================
 # Create Event
 # =========================
 
-@app.post("/events", response_model=EventResponse, status_code=201)
+@app.post(
+    "/events",
+    response_model=EventResponse,
+    status_code=201,
+)
 async def create_event(
     event_data: EventCreate,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: str = Depends(get_current_user),
 ):
     try:
         new_event = Event(
@@ -82,19 +201,23 @@ async def create_event(
     except Exception:
         raise HTTPException(
             status_code=500,
-            detail="Failed to create event"
+            detail="Failed to create event",
         )
 
 
 # =========================
-# Get All Events - Pagination
+# Get All Events
 # =========================
 
-@app.get("/events", response_model=list[EventResponse])
+@app.get(
+    "/events",
+    response_model=list[EventResponse],
+)
 async def get_events(
     skip: int = Query(0, ge=0),
     limit: int = Query(10, ge=1, le=100),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: str = Depends(get_current_user),
 ):
     result = await db.execute(
         select(Event)
@@ -112,10 +235,14 @@ async def get_events(
 # Get Event by ID
 # =========================
 
-@app.get("/events/{event_id}", response_model=EventResponse)
+@app.get(
+    "/events/{event_id}",
+    response_model=EventResponse,
+)
 async def get_event(
     event_id: int,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: str = Depends(get_current_user),
 ):
     result = await db.execute(
         select(Event).where(Event.id == event_id)
@@ -126,7 +253,7 @@ async def get_event(
     if event is None:
         raise HTTPException(
             status_code=404,
-            detail="Event not found"
+            detail="Event not found",
         )
 
     return event
@@ -136,11 +263,15 @@ async def get_event(
 # Update Event
 # =========================
 
-@app.patch("/events/{event_id}", response_model=EventResponse)
+@app.patch(
+    "/events/{event_id}",
+    response_model=EventResponse,
+)
 async def update_event(
     event_id: int,
     event_data: EventUpdate,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: str = Depends(get_current_user),
 ):
     result = await db.execute(
         select(Event).where(Event.id == event_id)
@@ -151,10 +282,12 @@ async def update_event(
     if event is None:
         raise HTTPException(
             status_code=404,
-            detail="Event not found"
+            detail="Event not found",
         )
 
-    update_data = event_data.model_dump(exclude_unset=True)
+    update_data = event_data.model_dump(
+        exclude_unset=True
+    )
 
     for field, value in update_data.items():
         setattr(event, field, value)
@@ -172,7 +305,8 @@ async def update_event(
 @app.delete("/events/{event_id}")
 async def delete_event(
     event_id: int,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: str = Depends(get_current_user),
 ):
     result = await db.execute(
         select(Event).where(Event.id == event_id)
@@ -183,7 +317,7 @@ async def delete_event(
     if event is None:
         raise HTTPException(
             status_code=404,
-            detail="Event not found"
+            detail="Event not found",
         )
 
     await db.delete(event)
