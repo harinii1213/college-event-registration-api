@@ -73,6 +73,7 @@ class EventUpdate(BaseModel):
 
 class EventResponse(EventCreate):
     id: int
+    owner_username: str
 
     class Config:
         from_attributes = True
@@ -133,6 +134,18 @@ async def get_current_user(
 
 
 # =========================
+# Authorization Helper
+# =========================
+
+def verify_event_owner(event: Event, current_user: str):
+    if event.owner_username != current_user:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not authorized to access this event",
+        )
+
+
+# =========================
 # Health Check
 # =========================
 
@@ -151,8 +164,6 @@ async def health_check():
 @app.post("/auth/login", response_model=TokenResponse)
 async def login(login_data: LoginRequest):
 
-    # Demo credentials for the internship task.
-    # Do not use these credentials in production.
     if (
         login_data.username != "admin"
         or login_data.password != "admin123"
@@ -190,6 +201,7 @@ async def create_event(
             description=event_data.description,
             date=event_data.date,
             venue=event_data.venue,
+            owner_username=current_user,
         )
 
         async with db.begin():
@@ -221,6 +233,7 @@ async def get_events(
 ):
     result = await db.execute(
         select(Event)
+        .where(Event.owner_username == current_user)
         .order_by(Event.id)
         .offset(skip)
         .limit(limit)
@@ -256,6 +269,8 @@ async def get_event(
             detail="Event not found",
         )
 
+    verify_event_owner(event, current_user)
+
     return event
 
 
@@ -284,6 +299,8 @@ async def update_event(
             status_code=404,
             detail="Event not found",
         )
+
+    verify_event_owner(event, current_user)
 
     update_data = event_data.model_dump(
         exclude_unset=True
@@ -319,6 +336,8 @@ async def delete_event(
             status_code=404,
             detail="Event not found",
         )
+
+    verify_event_owner(event, current_user)
 
     await db.delete(event)
     await db.commit()

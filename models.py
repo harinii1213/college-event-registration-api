@@ -1,126 +1,44 @@
-from fastapi import Depends, FastAPI, HTTPException, Query
-from pydantic import BaseModel, Field
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import ForeignKey, String, Text
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from database import AsyncSessionLocal
-from models import Event
+from database import Base
 
 
-app = FastAPI(title="College Event Registration API")
+class Event(Base):
+    __tablename__ = "events"
 
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    name: Mapped[str] = mapped_column(String(255))
+    description: Mapped[str] = mapped_column(Text)
+    date: Mapped[str] = mapped_column(String(50))
+    venue: Mapped[str] = mapped_column(String(255))
 
-# =========================
-# Database Dependency
-# =========================
-
-async def get_db():
-    async with AsyncSessionLocal() as session:
-        yield session
-
-
-# =========================
-# Pydantic Models
-# =========================
-
-class EventCreate(BaseModel):
-    name: str = Field(..., min_length=1, max_length=255)
-    description: str = Field(..., min_length=1)
-    date: str = Field(..., min_length=1, max_length=50)
-    venue: str = Field(..., min_length=1, max_length=255)
-
-
-class EventResponse(EventCreate):
-    id: int
-
-    class Config:
-        from_attributes = True
-
-
-# =========================
-# Health Check
-# =========================
-
-@app.get("/health")
-async def health_check():
-    return {
-        "status": "success",
-        "message": "API is running"
-    }
-
-
-# =========================
-# Create Event
-# =========================
-
-@app.post("/events", response_model=EventResponse, status_code=201)
-async def create_event(
-    event_data: EventCreate,
-    db: AsyncSession = Depends(get_db)
-):
-    try:
-        new_event = Event(
-            name=event_data.name,
-            description=event_data.description,
-            date=event_data.date,
-            venue=event_data.venue,
-        )
-
-        # Transactional database write
-        async with db.begin():
-            db.add(new_event)
-            await db.flush()
-
-        return new_event
-
-    except Exception:
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to create event"
-        )
-
-
-# =========================
-# Get All Events - Paginated
-# =========================
-
-@app.get("/events", response_model=list[EventResponse])
-async def get_events(
-    skip: int = Query(0, ge=0),
-    limit: int = Query(10, ge=1, le=100),
-    db: AsyncSession = Depends(get_db)
-):
-    result = await db.execute(
-        select(Event)
-        .order_by(Event.id)
-        .offset(skip)
-        .limit(limit)
+    # Owner of the event
+    owner_username: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+        index=True,
     )
 
-    events = result.scalars().all()
-
-    return events
-
-
-# =========================
-# Get Event by ID
-# =========================
-
-@app.get("/events/{event_id}", response_model=EventResponse)
-async def get_event(
-    event_id: int,
-    db: AsyncSession = Depends(get_db)
-):
-    result = await db.execute(
-        select(Event).where(Event.id == event_id)
+    registrations: Mapped[list["Registration"]] = relationship(
+        back_populates="event",
+        cascade="all, delete-orphan",
     )
 
-    event = result.scalar_one_or_none()
 
-    if event is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Event not found"
-        )
+class Registration(Base):
+    __tablename__ = "registrations"
 
-    return event
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+
+    event_id: Mapped[int] = mapped_column(
+        ForeignKey("events.id"),
+        nullable=False,
+    )
+
+    student_name: Mapped[str] = mapped_column(String(255))
+    student_email: Mapped[str] = mapped_column(String(255))
+
+    event: Mapped["Event"] = relationship(
+        back_populates="registrations"
+    )
