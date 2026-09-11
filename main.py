@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import AsyncSessionLocal
@@ -218,7 +218,7 @@ async def create_event(
 
 
 # =========================
-# Get All Events
+# Search and Filter Events
 # =========================
 
 @app.get(
@@ -226,18 +226,62 @@ async def create_event(
     response_model=list[EventResponse],
 )
 async def get_events(
+    search: str | None = Query(
+        default=None,
+        min_length=1,
+        description="Search event name or description",
+    ),
+    venue: str | None = Query(
+        default=None,
+        min_length=1,
+        description="Filter events by venue",
+    ),
+    date: str | None = Query(
+        default=None,
+        min_length=1,
+        description="Filter events by date",
+    ),
     skip: int = Query(0, ge=0),
     limit: int = Query(10, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
     current_user: str = Depends(get_current_user),
 ):
-    result = await db.execute(
-        select(Event)
-        .where(Event.owner_username == current_user)
+    query = select(Event).where(
+        Event.owner_username == current_user
+    )
+
+    # Search by event name or description
+    if search:
+        search_pattern = f"%{search}%"
+
+        query = query.where(
+            or_(
+                Event.name.ilike(search_pattern),
+                Event.description.ilike(search_pattern),
+            )
+        )
+
+    # Filter by venue
+    if venue:
+        query = query.where(
+            Event.venue.ilike(f"%{venue}%")
+        )
+
+    # Filter by date
+    if date:
+        query = query.where(
+            Event.date == date
+        )
+
+    # Stable ordering + pagination
+    query = (
+        query
         .order_by(Event.id)
         .offset(skip)
         .limit(limit)
     )
+
+    result = await db.execute(query)
 
     events = result.scalars().all()
 
