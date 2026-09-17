@@ -1,21 +1,31 @@
+import logging
 import os
 from datetime import datetime, timedelta, timezone
 
 import jwt
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Query, status
+from fastapi import (
+    Depends,
+    FastAPI,
+    HTTPException,
+    Query,
+    Request,
+    status,
+)
+from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import AsyncSessionLocal
+from logging_config import configure_logging
 from models import Event
 from services import event_service
 
 
-# =========================
-# Environment
-# =========================
+# ============================================================
+# ENVIRONMENT
+# ============================================================
 
 load_dotenv()
 
@@ -25,27 +35,74 @@ if not JWT_SECRET_KEY:
     raise ValueError("JWT_SECRET_KEY is not set")
 
 
-# =========================
-# App
-# =========================
+# ============================================================
+# LOGGING
+# ============================================================
 
-app = FastAPI(title="College Event Registration API")
+configure_logging()
+
+logger = logging.getLogger(__name__)
+
+
+# ============================================================
+# APP
+# ============================================================
+
+app = FastAPI(
+    title="College Event Registration API",
+    version="1.0.0",
+)
 
 security = HTTPBearer()
 
 
-# =========================
-# Database Dependency
-# =========================
+# ============================================================
+# GLOBAL EXCEPTION HANDLER
+# ============================================================
+
+@app.exception_handler(Exception)
+async def global_exception_handler(
+    request: Request,
+    exc: Exception,
+):
+    logger.exception(
+        "Unexpected server error | method=%s | path=%s",
+        request.method,
+        request.url.path,
+    )
+
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": (
+                "An unexpected server error occurred. "
+                "Please try again later."
+            )
+        },
+    )
+
+
+# ============================================================
+# DATABASE DEPENDENCY
+# ============================================================
 
 async def get_db():
     async with AsyncSessionLocal() as session:
-        yield session
+        try:
+            yield session
+        except Exception:
+            await session.rollback()
+            logger.exception(
+                "Database session rolled back because of an error"
+            )
+            raise
+        finally:
+            await session.close()
 
 
-# =========================
-# Pydantic Models
-# =========================
+# ============================================================
+# PYDANTIC MODELS
+# ============================================================
 
 class LoginRequest(BaseModel):
     username: str = Field(..., min_length=1)
@@ -65,10 +122,25 @@ class EventCreate(BaseModel):
 
 
 class EventUpdate(BaseModel):
-    name: str | None = Field(None, min_length=1, max_length=255)
-    description: str | None = Field(None, min_length=1)
-    date: str | None = Field(None, min_length=1, max_length=50)
-    venue: str | None = Field(None, min_length=1, max_length=255)
+    name: str | None = Field(
+        None,
+        min_length=1,
+        max_length=255,
+    )
+    description: str | None = Field(
+        None,
+        min_length=1,
+    )
+    date: str | None = Field(
+        None,
+        min_length=1,
+        max_length=50,
+    )
+    venue: str | None = Field(
+        None,
+        min_length=1,
+        max_length=255,
+    )
 
 
 class EventResponse(EventCreate):
@@ -79,9 +151,9 @@ class EventResponse(EventCreate):
         from_attributes = True
 
 
-# =========================
-# Authentication
-# =========================
+# ============================================================
+# AUTHENTICATION
+# ============================================================
 
 def create_access_token(username: str):
     expire = datetime.now(timezone.utc) + timedelta(hours=1)
@@ -133,47 +205,67 @@ async def get_current_user(
         )
 
 
-# =========================
-# Authorization Helper
-# =========================
+# ============================================================
+# AUTHORIZATION
+# ============================================================
 
-def verify_event_owner(event: Event, current_user: str):
+def verify_event_owner(
+    event: Event,
+    current_user: str,
+):
     if event.owner_username != current_user:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="You are not authorized to access this event",
+            detail=(
+                "You are not authorized to access this event"
+            ),
         )
 
 
-# =========================
-# Health Check
-# =========================
+# ============================================================
+# HEALTH CHECK
+# ============================================================
 
 @app.get("/health")
 async def health_check():
     return {
         "status": "success",
-        "message": "API is running"
+        "message": "API is running",
     }
 
 
-# =========================
-# Login
-# =========================
+# ============================================================
+# LOGIN
+# ============================================================
 
-@app.post("/auth/login", response_model=TokenResponse)
+@app.post(
+    "/auth/login",
+    response_model=TokenResponse,
+)
 async def login(login_data: LoginRequest):
 
     if (
         login_data.username != "admin"
         or login_data.password != "admin123"
     ):
+        logger.warning(
+            "Failed login attempt | username=%s",
+            login_data.username,
+        )
+
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid username or password",
         )
 
-    access_token = create_access_token(login_data.username)
+    access_token = create_access_token(
+        login_data.username
+    )
+
+    logger.info(
+        "Successful login | username=%s",
+        login_data.username,
+    )
 
     return {
         "access_token": access_token,
@@ -181,9 +273,9 @@ async def login(login_data: LoginRequest):
     }
 
 
-# =========================
-# Create Event
-# =========================
+# ============================================================
+# CREATE EVENT
+# ============================================================
 
 @app.post(
     "/events",
@@ -208,20 +300,35 @@ async def create_event(
         await db.commit()
         await db.refresh(new_event)
 
+        logger.info(
+            "Event created successfully | "
+            "event_id=%s | user=%s",
+            new_event.id,
+            current_user,
+        )
+
         return new_event
 
     except Exception:
         await db.rollback()
 
+        logger.exception(
+            "Failed to create event | user=%s",
+            current_user,
+        )
+
         raise HTTPException(
             status_code=500,
-            detail="Failed to create event",
+            detail=(
+                "Failed to create event. "
+                "Please try again."
+            ),
         )
 
 
-# =========================
-# Search and Filter Events
-# =========================
+# ============================================================
+# SEARCH / FILTER / PAGINATION
+# ============================================================
 
 @app.get(
     "/events",
@@ -243,27 +350,49 @@ async def get_events(
         min_length=1,
         description="Filter events by date",
     ),
-    skip: int = Query(0, ge=0),
-    limit: int = Query(10, ge=1, le=100),
+    skip: int = Query(
+        0,
+        ge=0,
+    ),
+    limit: int = Query(
+        10,
+        ge=1,
+        le=100,
+    ),
     db: AsyncSession = Depends(get_db),
     current_user: str = Depends(get_current_user),
 ):
-    events = await event_service.get_events(
-        db=db,
-        owner_username=current_user,
-        search=search,
-        venue=venue,
-        date=date,
-        skip=skip,
-        limit=limit,
-    )
+    try:
+        events = await event_service.get_events(
+            db=db,
+            owner_username=current_user,
+            search=search,
+            venue=venue,
+            date=date,
+            skip=skip,
+            limit=limit,
+        )
 
-    return events
+        return events
+
+    except Exception:
+        logger.exception(
+            "Failed to retrieve events | user=%s",
+            current_user,
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Failed to retrieve events. "
+                "Please try again."
+            ),
+        )
 
 
-# =========================
-# Get Event by ID
-# =========================
+# ============================================================
+# GET EVENT BY ID
+# ============================================================
 
 @app.get(
     "/events/{event_id}",
@@ -274,25 +403,48 @@ async def get_event(
     db: AsyncSession = Depends(get_db),
     current_user: str = Depends(get_current_user),
 ):
-    event = await event_service.get_event(
-        db=db,
-        event_id=event_id,
-    )
-
-    if event is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Event not found",
+    try:
+        event = await event_service.get_event(
+            db=db,
+            event_id=event_id,
         )
 
-    verify_event_owner(event, current_user)
+        if event is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Event not found",
+            )
 
-    return event
+        verify_event_owner(
+            event,
+            current_user,
+        )
+
+        return event
+
+    except HTTPException:
+        raise
+
+    except Exception:
+        logger.exception(
+            "Failed to retrieve event | "
+            "event_id=%s | user=%s",
+            event_id,
+            current_user,
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Failed to retrieve event. "
+                "Please try again."
+            ),
+        )
 
 
-# =========================
-# Update Event
-# =========================
+# ============================================================
+# UPDATE EVENT
+# ============================================================
 
 @app.patch(
     "/events/{event_id}",
@@ -315,26 +467,69 @@ async def update_event(
             detail="Event not found",
         )
 
-    verify_event_owner(event, current_user)
+    verify_event_owner(
+        event,
+        current_user,
+    )
 
     update_data = event_data.model_dump(
-        exclude_unset=True
+        exclude_unset=True,
     )
 
-    event = await event_service.update_event(
-        db=db,
-        event=event,
-        update_data=update_data,
-    )
+    if not update_data:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "At least one field is required "
+                "for update"
+            ),
+        )
 
-    return event
+    try:
+        event = await event_service.update_event(
+            db=db,
+            event=event,
+            update_data=update_data,
+        )
+
+        await db.commit()
+        await db.refresh(event)
+
+        logger.info(
+            "Event updated successfully | "
+            "event_id=%s | user=%s",
+            event_id,
+            current_user,
+        )
+
+        return event
+
+    except Exception:
+        await db.rollback()
+
+        logger.exception(
+            "Failed to update event | "
+            "event_id=%s | user=%s",
+            event_id,
+            current_user,
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Failed to update event. "
+                "Please try again."
+            ),
+        )
 
 
-# =========================
-# Delete Event
-# =========================
+# ============================================================
+# DELETE EVENT
+# ============================================================
 
-@app.delete("/events/{event_id}")
+@app.delete(
+    "/events/{event_id}",
+)
 async def delete_event(
     event_id: int,
     db: AsyncSession = Depends(get_db),
@@ -351,13 +546,44 @@ async def delete_event(
             detail="Event not found",
         )
 
-    verify_event_owner(event, current_user)
-
-    await event_service.delete_event(
-        db=db,
-        event=event,
+    verify_event_owner(
+        event,
+        current_user,
     )
 
-    return {
-        "message": "Event deleted successfully"
-    }
+    try:
+        await event_service.delete_event(
+            db=db,
+            event=event,
+        )
+
+        await db.commit()
+
+        logger.info(
+            "Event deleted successfully | "
+            "event_id=%s | user=%s",
+            event_id,
+            current_user,
+        )
+
+        return {
+            "message": "Event deleted successfully",
+        }
+
+    except Exception:
+        await db.rollback()
+
+        logger.exception(
+            "Failed to delete event | "
+            "event_id=%s | user=%s",
+            event_id,
+            current_user,
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Failed to delete event. "
+                "Please try again."
+            ),
+        )

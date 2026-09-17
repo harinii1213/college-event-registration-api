@@ -1,7 +1,12 @@
+import logging
+
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import Event
+
+
+logger = logging.getLogger(__name__)
 
 
 async def create_event(
@@ -22,6 +27,12 @@ async def create_event(
 
     db.add(new_event)
     await db.flush()
+
+    logger.info(
+        "Event prepared for creation | owner=%s | name=%s",
+        owner_username,
+        name,
+    )
 
     return new_event
 
@@ -90,8 +101,12 @@ async def update_event(
     for field, value in update_data.items():
         setattr(event, field, value)
 
-    await db.commit()
-    await db.refresh(event)
+    await db.flush()
+
+    logger.info(
+        "Event prepared for update | event_id=%s",
+        event.id,
+    )
 
     return event
 
@@ -101,4 +116,9 @@ async def delete_event(
     event: Event,
 ):
     await db.delete(event)
-    await db.commit()
+    await db.flush()
+
+    logger.info(
+        "Event prepared for deletion | event_id=%s",
+        event.id,
+    )
